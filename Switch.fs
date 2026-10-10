@@ -1,4 +1,4 @@
-/// La logica di un giro: hold/pausa, adapter, sonda, stato desiderato, cambio.
+/// One round: hold/pause, adapters, probe, desired state, change.
 module DnsAutoSwitch.Switch
 
 open System
@@ -10,18 +10,18 @@ type Change =
     { Adapter: string
       From: IPAddress list
       To: IPAddress
-      /// Ok in dry-run o se netsh e' andato bene
+      /// Ok in dry-run mode or when netsh succeeded
       Result: Result<unit, string> }
 
 type Outcome =
-    /// Non si tocca nulla, e perche'
+    /// Nothing touched, and why
     | Skipped of reason: string
-    /// Sonda fatta; la lista contiene solo gli adapter il cui DNS andava cambiato
-    | Reconciled of adGuardUp: bool * changes: Change list
+    /// Probe done; the list holds only the adapters whose DNS had to change
+    | Reconciled of primaryUp: bool * changes: Change list
 
 let formatDns (servers: IPAddress list) =
     match servers with
-    | [] -> "(nessuno)"
+    | [] -> "(none)"
     | _ -> servers |> List.map string |> String.concat ","
 
 let isOk (c: Change) =
@@ -29,8 +29,8 @@ let isOk (c: Change) =
     | Ok () -> true
     | Error _ -> false
 
-/// Hold di Pre-Shutdown.ps1: vale solo se scritto dopo il boot corrente e da meno di HoldMaxAge.
-/// Un hold vecchio (boot precedente, o script interrotto) viene rimosso.
+/// The hold file is honored only if written after the current boot and less than HoldMaxAge ago.
+/// A stale one (previous boot, or a shutdown script that died) is deleted.
 let private holdActive (s: Settings) =
     if not (File.Exists s.HoldFile) then
         false
@@ -46,25 +46,27 @@ let private holdActive (s: Settings) =
             false
 
 let private blocker (s: Settings) =
-    if holdActive s then Some "hold di Pre-Shutdown.ps1 attivo"
-    elif File.Exists s.PauseFile then Some $"pausa manuale ({s.PauseFile})"
+    if holdActive s then Some $"hold file active ({s.HoldFile})"
+    elif File.Exists s.PauseFile then Some $"pause file present ({s.PauseFile})"
     else None
 
-/// Un giro: decide e, se non dryRun, applica. Il blocco (hold/pausa) e' ricontrollato dopo la sonda,
-/// per non cambiare il DNS se l'hold e' arrivato mentre il giro era in corso.
+/// One round: decide and, unless dryRun, apply. Hold/pause are checked again after the probe,
+/// so a hold raised while the round was running is still respected.
 let tick (s: Settings) (dryRun: bool) =
     task {
         match blocker s with
         | Some why -> return Skipped why
         | None ->
-            match Dns.lanAdapters s.LanPrefix s.Gateway with
-            | [] -> return Skipped $"nessun adapter {s.LanPrefix}* con gateway {s.Gateway}"
+            match Dns.lanAdapters s.AdapterPrefix s.Gateway with
+            | [] ->
+                let gateway = s.Gateway |> Option.map string |> Option.defaultValue "any"
+                return Skipped $"no adapter matches (prefix '{s.AdapterPrefix}', gateway {gateway})"
             | adapters ->
-                let! up = Dns.probe s.AdGuard s.ProbeName s.ProbeTimeout s.ProbeAttempts
+                let! up = Dns.probe s.Primary s.ProbeName s.ProbeTimeout s.ProbeAttempts
                 match blocker s with
                 | Some why -> return Skipped why
                 | None ->
-                    let desired = if up then s.AdGuard else s.Router
+                    let desired = if up then s.Primary else s.Fallback
                     let changes =
                         adapters
                         |> List.filter (fun a -> a.Dns <> [ desired ])

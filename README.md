@@ -1,120 +1,163 @@
 # DnsAutoSwitch
 
-Servizio Windows in F# (.NET 10) per la Beast (MyMain, `192.168.1.2`): tiene il DNS della LAN su
-**AdGuard Home** (Ubuntu `192.168.1.202`) quando risponde, e sul **router** Plenitude (`192.168.1.1`) quando no.
-Ogni minuto. Senza cloud, senza dipendenze dalla risoluzione dei nomi.
+A small Windows service that keeps your LAN DNS pointed at a **primary** server (AdGuard Home, Pi-hole, any
+local resolver) while it answers, and switches to a **fallback** (typically the router) when it does not.
+One check per minute, one DNS server at a time, no cloud, no dependency on name resolution.
 
-Contesto e storia: repo `hello-gitea`, [`DNS_AUTOSWITCH.md`](../hello-gitea/DNS_AUTOSWITCH.md) e
-[`RESUME_DNS_TOGGLE_CHAT.md`](../hello-gitea/RESUME_DNS_TOGGLE_CHAT.md).
+Written in F# on .NET 10. Tested on Windows 11 with AdGuard Home; Pi-hole works the same way.
 
-## Perché
+## Why not just set a secondary DNS server?
 
-- AdGuard gira su Ubuntu `.202`, che non è sempre acceso. Con il DNS su `.202` e Ubuntu spento la Beast è senza nomi.
-- Un DNS secondario non è una soluzione: il resolver di Windows non fa failover deterministico e bypassa AdGuard
-  a caso (`TROUBLESHOOTING_WIN11_BEAST.md`, Issue 3). Quindi **un solo server**, e qualcuno deve cambiarlo.
-- Fino al 2026-10-10 quel qualcuno era l'utente: shortcut sul desktop dopo il boot, `Pre-Shutdown.ps1` allo spegnimento.
-  Il buco: boot con Ubuntu spento dopo uno shutdown dal menu Start (che salta `Pre-Shutdown.ps1`), o Ubuntu che si
-  spegne/riaccende durante il giorno. Il crash loop di Cloudflared del 2026-10-05 era esattamente questo caso.
+Because Windows does not fail over deterministically. With two servers configured, the resolver happily
+sends queries to the secondary whenever the primary is slow, and keeps using it for a while. With a
+filtering resolver that means ads and trackers slip through at random, and local names stop resolving.
+The usual advice for Pi-hole and AdGuard users is "one DNS server only", which leaves you without DNS
+whenever that server is off. DnsAutoSwitch keeps the single-server setup and does the switching for you.
 
-## Cosa fa, un giro ogni 60 s
+## How it works
 
-1. **Blocchi**: se esiste l'hold di `Pre-Shutdown.ps1` (valido) o il file di pausa, non fa nulla.
-2. **Adapter**: solo quelli Up, con IPv4 in `192.168.1.x` e default gateway `192.168.1.1`.
-   In pratica `Wi-Fi 2`. Esclude l'ICS (`Ethernet_Power_Side`, `192.168.137.1`) e gli adapter virtuali.
-   Fuori dalla LAN di casa (gateway diverso) non tocca niente.
-3. **Sonda**: una query DNS UDP diretta a `192.168.1.202:53` per `gitea.home` (rewrite di AdGuard: risponde da solo,
-   niente Internet di mezzo). Timeout 1,5 s, due tentativi. Qualunque risposta con lo stesso ID = AdGuard vivo.
-   La sonda è il **servizio DNS**, non Ubuntu: con `:22` aperto e AdGuard giù, il DNS va sul router.
-4. **Ricontrollo dei blocchi** dopo la sonda, così un hold arrivato durante il giro viene rispettato.
-5. **Stato desiderato**: AdGuard risponde → `192.168.1.202`, altrimenti → `192.168.1.1`.
-   Per ogni adapter con DNS diverso da quello: `netsh interface ipv4 set dnsservers ... source=static address=<ip>`
-   (un solo server, `validate=no`) e flush della cache (`DnsFlushResolverCache`).
-6. **Log** solo delle transizioni (AdGuard raggiungibile/non raggiungibile, in attesa/ripresa) e dei cambi.
+Every `IntervalSeconds` (default 60) the service:
 
-**Niente isteresi, per scelta**: durante un riavvio di Ubuntu il DNS va sul router e torna su AdGuard un minuto
-dopo. È il comportamento corretto, non rumore.
+1. does nothing if a **hold** or **pause** file is present (see below);
+2. selects the adapters to manage: up, with an IPv4 address matching `AdapterPrefix` and a default
+   gateway (the configured `Gateway`, or any gateway when none is configured). Virtual adapters and
+   Internet Connection Sharing interfaces have no default gateway, so they are left alone;
+3. probes the primary with a direct UDP DNS query to `Primary:53` for `ProbeName`. Any reply with the
+   right transaction ID counts, even NXDOMAIN: the question is whether the server is alive, not what it
+   answers. The probe works by IP, so it keeps working while the system DNS is dead;
+4. checks hold and pause again, so a hold raised during the round is respected;
+5. sets every managed adapter whose DNS differs from the desired server (`Primary` if reachable,
+   `Fallback` otherwise) to that single static server and flushes the resolver cache;
+6. logs transitions and changes only. A quiet minute writes nothing.
 
-## File
+There is deliberately **no hysteresis**: when the primary reboots, DNS goes to the fallback and comes
+back a minute later. That is the correct behaviour, not noise.
 
-| Cosa | Dove |
-|---|---|
-| Binari (publish) | `C:\Tools\DnsAutoSwitch\DnsAutoSwitch.exe` + dll |
-| Log | `C:\Tools\DnsAutoSwitch.log` (rotazione a 512 KB in `.log.1`) e Event Log *Application*, sorgente `DnsAutoSwitch` |
-| Hold | `C:\Tools\DnsAutoSwitch.hold` — lo scrive `Pre-Shutdown.ps1` (data ISO). Vale solo se la data è **dopo il boot corrente** e da **meno di 30 min**; uno vecchio viene cancellato dal servizio stesso |
-| Pausa manuale | `C:\Tools\DnsAutoSwitch.paused` — finché esiste il servizio non tocca il DNS (es. per usare gli shortcut a mano) |
-| Costanti | [`Config.fs`](Config.fs): IP, nome della sonda, timeout, cadenza, percorsi. Si cambiano lì e si ricompila |
+## Install
 
-## Comandi
+1. Download `DnsAutoSwitch-win-x64.zip` from the [releases](../../releases) (self-contained, no .NET
+   runtime needed) and unpack it somewhere permanent, for example `C:\Tools\DnsAutoSwitch`.
+2. Copy `appsettings.example.json` to `appsettings.json` next to the executable and set at least
+   `Primary` and `Fallback`.
+3. Check the decision without changing anything (no elevation needed):
+
+   ```powershell
+   .\DnsAutoSwitch.exe check
+   ```
+
+4. From an elevated prompt, register and start the service (automatic, delayed start, restart on failure):
+
+   ```powershell
+   .\DnsAutoSwitch.exe install
+   ```
+
+The service runs as LocalSystem. `DnsAutoSwitch.exe uninstall` stops and removes it; the files stay.
+
+## Configuration
+
+`appsettings.json` next to the executable, section `DnsAutoSwitch`. Missing keys keep their defaults.
+Relative paths are relative to the executable's folder.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Primary` | required | DNS server to use while it answers (AdGuard Home, Pi-hole, ...) |
+| `Fallback` | required | DNS server to use otherwise (usually the router) |
+| `Gateway` | `""` | Only manage adapters whose default gateway is this address. Empty = any adapter with a default gateway. Set it if your machine ever joins other `192.168.x` networks |
+| `AdapterPrefix` | `""` | Only manage adapters whose IPv4 address starts with this, e.g. `192.168.1.`. Empty = any |
+| `ProbeName` | `probe.invalid` | Name sent by the probe. Any reply counts, but a name the primary resolves locally (a rewrite or a local record) keeps the probe independent from the Internet |
+| `ProbeTimeoutMs` | `1500` | Timeout per attempt |
+| `ProbeAttempts` | `2` | Attempts per round; one reply is enough |
+| `IntervalSeconds` | `60` | Time between rounds (minimum 5) |
+| `HoldMaxAgeMinutes` | `30` | How long a hold file stays valid |
+| `HoldFile` | `DnsAutoSwitch.hold` | See *Hold and pause* |
+| `PauseFile` | `DnsAutoSwitch.paused` | See *Hold and pause* |
+| `LogFile` | `DnsAutoSwitch.log` | Text log, rotated at 512 KB |
+
+`check` and `once` accept `--primary IP` and `--fallback IP` to try other servers without editing the file.
+
+## Commands
 
 ```text
-DnsAutoSwitch [check|once|install|uninstall] [--adguard IP] [--router IP]
-  (nessun argomento)  gira come servizio Windows (in console, se lanciato a mano)
-  check               un giro in dry-run: stato e cosa farebbe
-  once                un giro vero (prompt elevato)
-  install             registra (Automatico, avvio ritardato, recovery restart/20 s) e avvia il servizio (prompt elevato)
-  uninstall           ferma e rimuove il servizio (prompt elevato)
-  --adguard/--router  override degli IP, per check/once
+DnsAutoSwitch [check|once|install|uninstall] [--primary IP] [--fallback IP]
+  (no arguments)      run as a Windows service (as a console app when started by hand)
+  check               one dry run: current state and what would change
+  once                one real round (elevated prompt)
+  install             register the service (automatic, delayed start) and start it (elevated prompt)
+  uninstall           stop and remove the service (elevated prompt)
 ```
 
-Esempio di `check` con Ubuntu spento e DNS già sul router:
+Example of `check` with the primary down and DNS already on the fallback:
 
 ```text
 boot: 2026-10-10 20:26:09
-hold: no   pausa: no
+hold: no   pause: no
 adapter [Wi-Fi 2] 192.168.1.2  DNS=192.168.1.1
-AdGuard 192.168.1.202: NON raggiungibile
-DNS gia' giusto, niente da cambiare.
+primary 192.168.1.202: UNREACHABLE
+DNS already right, nothing to change.
 ```
 
-Per simulare "AdGuard risponde" senza Ubuntu: `check --adguard 192.168.1.1` (il router risponde alla sonda).
+## Hold and pause
 
-## Build, deploy, aggiornamento
+**Pause**: while the pause file exists, the service leaves DNS alone. Create it before setting DNS by
+hand, delete it to resume. The log shows `waiting: pause file present` and `resumed`.
 
-Serve l'SDK .NET 10 (installato il 2026-10-10 con `winget install Microsoft.DotNet.SDK.10`). Il publish è
-framework-dependent: usa il runtime 10 in `C:\Program Files\dotnet`.
+**Hold**: for shutdown scripts. If your shutdown routine switches DNS to the fallback and then powers
+off the primary, the service would switch DNS back to the primary in between, and the machine would boot
+with DNS pointing at a server that is off. The script writes an ISO-8601 timestamp into the hold file
+right before touching anything:
 
 ```powershell
-dotnet publish -c Release -o C:\Tools\DnsAutoSwitch
+Get-Date -Format o | Set-Content -LiteralPath 'C:\Tools\DnsAutoSwitch\DnsAutoSwitch.hold' -Encoding ASCII
 ```
 
-Prima installazione, da prompt elevato:
+The hold is honoured only if the timestamp is **later than the current boot** and **younger than
+`HoldMaxAgeMinutes`**; anything older is deleted by the service itself. So a hold never survives a reboot
+and never outlives a script that died, and there is nothing to clean up. If the script aborts the
+shutdown, it should delete the file so the service resumes within a minute. No elevation is needed for
+any of this, which is the reason it is a file and not a `Stop-Service`.
+
+## Logging
+
+- `LogFile` (default `DnsAutoSwitch.log` next to the executable): one line per event, local time.
+- Windows Event Log, *Application*, source `DnsAutoSwitch`: the same events, from Information up.
+
+```text
+2026-10-10 21:42:43 Information started: primary 192.168.1.202, fallback 192.168.1.1, probe gitea.home every 60s
+2026-10-10 21:42:46 Information primary DNS 192.168.1.202 UNREACHABLE
+2026-10-10 22:00:43 Information primary DNS 192.168.1.202 reachable
+2026-10-10 22:00:43 Information [Wi-Fi 2] DNS 192.168.1.1 -> 192.168.1.202
+```
+
+## Limits
+
+- Windows only (netsh, Windows services, Event Log). IPv4 only.
+- It sets a **single static** DNS server on the managed adapters. If you rely on DHCP-assigned DNS, this
+  tool replaces that.
+- The probe tells whether the server answers, not whether it answers well. A primary that is up but
+  slow stays selected, exactly as it would without this tool.
+
+## Build from source
+
+Requires the .NET 10 SDK.
 
 ```powershell
-C:\Tools\DnsAutoSwitch\DnsAutoSwitch.exe install
+dotnet build -c Release
+dotnet publish -c Release -o C:\Tools\DnsAutoSwitch             # framework-dependent
+dotnet publish -c Release --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o publish   # single exe
 ```
 
-Aggiornamento (l'exe è bloccato finché il servizio gira), da prompt elevato:
+To update a running installation: `Stop-Service DnsAutoSwitch`, publish, `Start-Service DnsAutoSwitch`
+(the executable is locked while the service runs). `appsettings.json` is never overwritten by a publish.
 
-```powershell
-Stop-Service DnsAutoSwitch
-dotnet publish -c Release -o C:\Tools\DnsAutoSwitch
-Start-Service DnsAutoSwitch
-```
-
-Rimozione: `DnsAutoSwitch.exe uninstall` (ferma e cancella il servizio; i file restano).
-
-## Integrazione con `Pre-Shutdown.ps1`
-
-Allo spegnimento (`chiudi.bat` → `Pre-Shutdown.ps1`, repo `hello-gitea`) il passo **H**, prima di toccare la rete,
-scrive l'hold. Senza, tra il passo 1b (DNS → router) e il poweroff di Ubuntu il servizio rimetterebbe AdGuard,
-e al boot successivo la Beast partirebbe con il DNS su `.202` spento. L'hold viene tolto se lo spegnimento si
-annulla (exit 2) e scartato dal servizio al boot successivo (data precedente al boot).
-
-## Struttura
-
-| File | Contenuto |
+| File | Content |
 |---|---|
-| `Config.fs` | `Settings` e `defaults`: tutte le costanti |
-| `Dns.fs` | sonda UDP (pacchetto DNS costruito a mano), adapter della LAN, `netsh`, flush, istante del boot |
-| `Switch.fs` | un giro: blocchi, sonda, stato desiderato, cambi. `tick settings dryRun` → `Skipped` / `Reconciled` |
-| `FileLog.fs` | `ILoggerProvider` minimale su file |
-| `Worker.fs` | `BackgroundService`: `PeriodicTimer`, log delle sole transizioni |
-| `Program.fs` | comandi, `sc.exe` per install/uninstall, host (`AddWindowsService`, Event Log da Information in su) |
+| `Config.fs` | `Settings`, defaults, `appsettings.json` loading and validation |
+| `Dns.fs` | UDP probe (hand-built DNS packet), LAN adapters, `netsh`, cache flush, boot time |
+| `Switch.fs` | one round: hold/pause, probe, desired state, changes. `tick settings dryRun` → `Skipped` / `Reconciled` |
+| `FileLog.fs` | minimal `ILoggerProvider` writing to a file |
+| `Worker.fs` | `BackgroundService` with a `PeriodicTimer`, logging transitions only |
+| `Program.fs` | commands, `sc.exe` for install/uninstall, host setup |
 
-## Verifiche (2026-10-10, primo giorno)
+## License
 
-- `check` in dry-run: adapter, sonda e decisione corretti con Ubuntu spento; `--adguard 192.168.1.1` → "raggiungibile".
-- Switch vero: DNS messo a mano su `.202` (spento), `once` lo ha riportato su `192.168.1.1`.
-- `install`: `AUTO_START (DELAYED)`, recovery `RESTART` dopo 20 s, servizio `Running`, log su file con avvio e stato.
-- Hold, hold stale e pausa contro il servizio in esecuzione: tutti e tre ok (dettaglio in `DNS_AUTOSWITCH.md`, repo `hello-gitea`).
-- Ubuntu acceso con il servizio in esecuzione (22:00:43): "AdGuard 192.168.1.202 raggiungibile" e "[Wi-Fi 2] DNS 192.168.1.1 -> 192.168.1.202" nello stesso giro, senza shortcut.
+MIT.

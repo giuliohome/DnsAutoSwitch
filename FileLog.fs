@@ -1,4 +1,4 @@
-/// Logger minimale su file, con rotazione a 512 KB (una riga per evento, leggibile a occhio).
+/// Minimal file logger: one line per event, rotated at 512 KB.
 module DnsAutoSwitch.FileLog
 
 open System

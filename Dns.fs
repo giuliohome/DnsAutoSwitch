@@ -1,4 +1,4 @@
-/// Primitive di rete: sonda DNS UDP diretta, adapter della LAN, netsh, flush della cache.
+/// Network primitives: direct UDP DNS probe, LAN adapters, netsh, resolver cache flush, boot time.
 module DnsAutoSwitch.Dns
 
 open System
@@ -10,7 +10,7 @@ open System.Runtime.InteropServices
 open System.Text
 open System.Threading
 
-/// Query DNS standard: un QNAME, tipo A, classe IN, recursion desired.
+/// A standard DNS query: one QNAME, type A, class IN, recursion desired.
 let private buildQuery (id: uint16) (name: string) =
     let header =
         [| byte (id >>> 8); byte id   // ID
@@ -20,10 +20,10 @@ let private buildQuery (id: uint16) (name: string) =
     let qname =
         name.Split('.', StringSplitOptions.RemoveEmptyEntries)
         |> Array.collect (fun label -> Array.append [| byte label.Length |] (Encoding.ASCII.GetBytes label))
-    Array.concat [ header; qname; [| 0uy; 0uy; 1uy; 0uy; 1uy |] ]   // fine QNAME, QTYPE A, QCLASS IN
+    Array.concat [ header; qname; [| 0uy; 0uy; 1uy; 0uy; 1uy |] ]   // end of QNAME, QTYPE A, QCLASS IN
 
-/// Una query al server: true se arriva una risposta con lo stesso ID, qualunque sia il RCODE
-/// (anche NXDOMAIN vuol dire che il server e' vivo). Lavora per IP: non dipende da nessuna risoluzione.
+/// One query to the server: true if a reply with the same ID comes back, whatever its RCODE
+/// (NXDOMAIN still means the server is alive). Works by IP, so it needs no name resolution.
 let private querySingle (server: IPAddress) (name: string) (timeout: TimeSpan) =
     task {
         let id = uint16 (Random.Shared.Next(1, 0x10000))
@@ -39,7 +39,7 @@ let private querySingle (server: IPAddress) (name: string) (timeout: TimeSpan) =
             return false
     }
 
-/// Sonda con tentativi: basta una risposta per dire "raggiungibile".
+/// Probe with retries: one reply is enough to call the server reachable.
 let probe (server: IPAddress) (name: string) (timeout: TimeSpan) (attempts: int) =
     task {
         let mutable up = false
@@ -54,13 +54,14 @@ let probe (server: IPAddress) (name: string) (timeout: TimeSpan) (attempts: int)
 type Adapter =
     { Name: string
       Ipv4: IPAddress
-      /// Server DNS IPv4 attuali, nell'ordine di Windows
+      /// Current IPv4 DNS servers, in Windows order
       Dns: IPAddress list }
 
 let private isIpv4 (ip: IPAddress) = ip.AddressFamily = AddressFamily.InterNetwork
 
-/// Adapter della LAN di casa: Up, con un IPv4 nel prefisso e il router come default gateway.
-let lanAdapters (lanPrefix: string) (gateway: IPAddress) : Adapter list =
+/// LAN adapters: up, not loopback, with an IPv4 address matching the prefix ("" = any) and a default
+/// gateway: the configured one, or any IPv4 gateway when none is configured.
+let lanAdapters (prefix: string) (gateway: IPAddress option) : Adapter list =
     NetworkInterface.GetAllNetworkInterfaces()
     |> Seq.filter (fun nic ->
         nic.OperationalStatus = OperationalStatus.Up
@@ -70,10 +71,16 @@ let lanAdapters (lanPrefix: string) (gateway: IPAddress) : Adapter list =
         let ipv4 =
             props.UnicastAddresses
             |> Seq.map (fun u -> u.Address)
-            |> Seq.tryFind (fun ip -> isIpv4 ip && ip.ToString().StartsWith(lanPrefix, StringComparison.Ordinal))
-        let viaRouter = props.GatewayAddresses |> Seq.exists (fun g -> g.Address.Equals gateway)
+            |> Seq.tryFind (fun ip ->
+                isIpv4 ip && (prefix = "" || ip.ToString().StartsWith(prefix, StringComparison.Ordinal)))
+        let gateways =
+            props.GatewayAddresses |> Seq.map (fun g -> g.Address) |> Seq.filter isIpv4 |> List.ofSeq
+        let routed =
+            match gateway with
+            | Some wanted -> gateways |> List.exists (fun g -> g.Equals wanted)
+            | None -> not gateways.IsEmpty
         match ipv4 with
-        | Some ip when viaRouter ->
+        | Some ip when routed ->
             Some { Name = nic.Name; Ipv4 = ip; Dns = props.DnsAddresses |> Seq.filter isIpv4 |> List.ofSeq }
         | _ -> None)
     |> List.ofSeq
@@ -92,8 +99,8 @@ let private runProcess (file: string) (args: string) =
         let detail = $"{out.Trim()} {err.Trim()}".Trim()
         Error $"{file} {args} -> exit {p.ExitCode}: {detail}"
 
-/// DNS statico con un solo server, come gli script Set-DNS-*.ps1
-/// (mai un secondario: il resolver di Windows non fa failover deterministico).
+/// Static DNS with a single server. Never a secondary one: the Windows resolver does not fail over
+/// deterministically, so a secondary server would silently bypass the primary.
 let setDns (adapterName: string) (server: IPAddress) =
     runProcess "netsh.exe"
         $"interface ipv4 set dnsservers name=\"{adapterName}\" source=static address={server} register=primary validate=no"
@@ -101,9 +108,9 @@ let setDns (adapterName: string) (server: IPAddress) =
 [<DllImport("dnsapi.dll")>]
 extern bool DnsFlushResolverCache()
 
-/// Equivale a ipconfig /flushdns, senza processo esterno.
+/// Same as ipconfig /flushdns, without spawning a process.
 let flush () = DnsFlushResolverCache() |> ignore
 
-/// Istante del boot corrente (da GetTickCount64).
+/// When the current boot happened (from GetTickCount64).
 let bootTime () =
     DateTimeOffset.Now - TimeSpan.FromMilliseconds(float Environment.TickCount64)

@@ -7,8 +7,10 @@
     <SelfContained>false</SelfContained>
     <AssemblyName>DnsAutoSwitch</AssemblyName>
     <RootNamespace>DnsAutoSwitch</RootNamespace>
-    <Version>1.0.0</Version>
-    <Description>Beast: DNS della LAN su AdGuard (.202) se risponde, altrimenti sul router. Servizio Windows.</Description>
+    <Version>1.1.0</Version>
+    <Authors>giuliohome</Authors>
+    <Description>Windows service that keeps the LAN DNS on a primary server (AdGuard Home, Pi-hole) while it answers, and on a fallback otherwise.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
@@ -23,6 +25,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="appsettings.example.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
   </ItemGroup>

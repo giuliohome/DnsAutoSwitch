@@ -1,10 +1,9 @@
-/// Entry point: servizio Windows (nessun argomento) o comandi check / once / install / uninstall.
+/// Entry point: Windows service (no arguments) or the commands check / once / install / uninstall.
 module DnsAutoSwitch.Program
 
 open System
 open System.Diagnostics
 open System.IO
-open System.Net
 open System.Security.Principal
 open System.ServiceProcess
 open Microsoft.Extensions.DependencyInjection
@@ -17,28 +16,29 @@ open DnsAutoSwitch.FileLog
 open DnsAutoSwitch.Worker
 
 let serviceName = "DnsAutoSwitch"
-let displayName = "DNS AutoSwitch (AdGuard <-> Router)"
+let displayName = "DNS AutoSwitch (primary <-> fallback)"
 let description =
-    "Ogni minuto: se AdGuard su 192.168.1.202 risponde, DNS della LAN su AdGuard, altrimenti sul router. "
-    + "Hold da Pre-Shutdown.ps1 (C:\\Tools\\DnsAutoSwitch.hold), pausa manuale con C:\\Tools\\DnsAutoSwitch.paused. "
-    + "Log: C:\\Tools\\DnsAutoSwitch.log. Sorgente: repo hello-gitea, cartella DnsAutoSwitch."
+    "Keeps the LAN DNS on the primary server (AdGuard Home, Pi-hole, ...) while it answers, and on the fallback "
+    + "(router) otherwise. Configuration: appsettings.json next to the executable. Hold and pause files pause it."
 
 let usage () =
-    printfn "DnsAutoSwitch [check|once|install|uninstall] [--adguard IP] [--router IP]"
-    printfn "  (nessun argomento)  gira come servizio Windows (in console, se lanciato a mano)"
-    printfn "  check               un giro in dry-run: stato e cosa farebbe"
-    printfn "  once                un giro vero (prompt elevato)"
-    printfn "  install             registra (Automatico, avvio ritardato) e avvia il servizio (prompt elevato)"
-    printfn "  uninstall           ferma e rimuove il servizio (prompt elevato)"
-    printfn "  --adguard/--router  override degli IP, per check/once"
+    printfn "DnsAutoSwitch [check|once|install|uninstall] [--primary IP] [--fallback IP]"
+    printfn "  (no arguments)      run as a Windows service (as a console app when started by hand)"
+    printfn "  check               one dry run: current state and what would change"
+    printfn "  once                one real round (elevated prompt)"
+    printfn "  install             register the service (automatic, delayed start) and start it (elevated prompt)"
+    printfn "  uninstall           stop and remove the service (elevated prompt)"
+    printfn "  --primary/--fallback  override the configured servers (check/once)"
+    printfn ""
+    printfn "Configuration: %s (see appsettings.example.json)" configFile
 
-/// Argomenti: opzioni --adguard/--router, piu' al massimo un comando.
-let rec private parse (s: Settings) (cmds: string list) (args: string list) =
+/// Arguments: --primary/--fallback overrides, plus at most one command.
+let rec private parse (overrides: FileSettings -> FileSettings) (cmds: string list) (args: string list) =
     match args with
-    | "--adguard" :: ip :: rest -> parse { s with AdGuard = IPAddress.Parse ip } cmds rest
-    | "--router" :: ip :: rest -> parse { s with Router = IPAddress.Parse ip } cmds rest
-    | cmd :: rest -> parse s (cmd :: cmds) rest
-    | [] -> s, List.rev cmds
+    | "--primary" :: ip :: rest -> parse (overrides >> fun (f: FileSettings) -> { f with Primary = ip }) cmds rest
+    | "--fallback" :: ip :: rest -> parse (overrides >> fun (f: FileSettings) -> { f with Fallback = ip }) cmds rest
+    | cmd :: rest -> parse overrides (cmd :: cmds) rest
+    | [] -> overrides, List.rev cmds
 
 let private isAdmin () =
     use identity = WindowsIdentity.GetCurrent()
@@ -46,7 +46,7 @@ let private isAdmin () =
 
 let private requireAdmin () =
     if not (isAdmin ()) then
-        eprintfn "Serve un prompt elevato (amministratore)."
+        eprintfn "This command needs an elevated (administrator) prompt."
         exit 2
 
 let private sc (args: string) =
@@ -68,7 +68,7 @@ let install () =
     let exe = Environment.ProcessPath
     let created =
         match status () with
-        | Some _ -> printfn "servizio gia' registrato."; 0
+        | Some _ -> printfn "service already registered."; 0
         | None ->
             sc $"create {serviceName} binPath= \"\\\"{exe}\\\"\" start= delayed-auto DisplayName= \"{displayName}\""
     if created <> 0 then 1
@@ -77,61 +77,77 @@ let install () =
         let rcFailure = sc $"failure {serviceName} reset= 86400 actions= restart/20000"
         let rcStart =
             match status () with
-            | Some ServiceControllerStatus.Running -> printfn "gia' in esecuzione."; 0
+            | Some ServiceControllerStatus.Running -> printfn "already running."; 0
             | _ -> sc $"start {serviceName}"
         if rcDescription = 0 && rcFailure = 0 && rcStart = 0 then 0 else 1
 
 let uninstall () =
     requireAdmin ()
     match status () with
-    | None -> printfn "servizio non registrato."; 0
+    | None -> printfn "service not registered."; 0
     | Some current ->
         if current <> ServiceControllerStatus.Stopped then
             use svc = new ServiceController(serviceName)
             svc.Stop()
             svc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds 15.)
-            printfn "fermato."
+            printfn "stopped."
         sc $"delete {serviceName}"
 
-/// check (dry-run) e once (vero): stampa stato e decisione.
+/// check (dry run) and once (real): print the state and the decision.
 let private describe (s: Settings) (dryRun: bool) =
     task {
         printfn "boot: %s" ((Dns.bootTime ()).ToString "yyyy-MM-dd HH:mm:ss")
-        printfn "hold: %s   pausa: %s"
-            (if File.Exists s.HoldFile then "PRESENTE" else "no")
-            (if File.Exists s.PauseFile then "PRESENTE" else "no")
-        for a in Dns.lanAdapters s.LanPrefix s.Gateway do
+        printfn "hold: %s   pause: %s"
+            (if File.Exists s.HoldFile then "PRESENT" else "no")
+            (if File.Exists s.PauseFile then "PRESENT" else "no")
+        for a in Dns.lanAdapters s.AdapterPrefix s.Gateway do
             printfn "adapter [%s] %O  DNS=%s" a.Name a.Ipv4 (formatDns a.Dns)
         let! outcome = tick s dryRun
         match outcome with
-        | Skipped why -> printfn "nessuna azione: %s" why
+        | Skipped why -> printfn "no action: %s" why
         | Reconciled(up, changes) ->
-            printfn "AdGuard %O: %s" s.AdGuard (if up then "raggiungibile" else "NON raggiungibile")
-            if changes.IsEmpty then printfn "DNS gia' giusto, niente da cambiare."
+            printfn "primary %O: %s" s.Primary (if up then "reachable" else "UNREACHABLE")
+            if changes.IsEmpty then printfn "DNS already right, nothing to change."
             for c in changes do
                 match c.Result with
-                | Ok () -> printfn "%s [%s] DNS %s -> %O" (if dryRun then "FAREI:" else "FATTO:") c.Adapter (formatDns c.From) c.To
-                | Error e -> printfn "ERRORE [%s] DNS -> %O: %s" c.Adapter c.To e
+                | Ok () -> printfn "%s [%s] DNS %s -> %O" (if dryRun then "WOULD:" else "DONE: ") c.Adapter (formatDns c.From) c.To
+                | Error e -> printfn "ERROR [%s] DNS -> %O: %s" c.Adapter c.To e
         return 0
     }
 
 let private runService (s: Settings) =
-    let builder = Host.CreateApplicationBuilder()
+    let builder = Host.CreateApplicationBuilder(HostApplicationBuilderSettings(ContentRootPath = baseDirectory))
     builder.Services.AddWindowsService(fun o -> o.ServiceName <- serviceName) |> ignore
     builder.Services.AddSingleton<Settings>(s) |> ignore
     builder.Services.AddHostedService<Worker>() |> ignore
     builder.Logging.AddProvider(new FileLoggerProvider(s.LogFile)) |> ignore
-    // Il default scrive nell'Event Log solo da Warning in su: qui anche gli switch (Information)
+    // By default only Warning and above reach the Event Log; switches are Information.
     builder.Logging.AddFilter<EventLogLoggerProvider>(fun (level: LogLevel) -> level >= LogLevel.Information) |> ignore
     builder.Build().Run()
 
+/// A service has no console: a configuration error goes to the default log file next to the executable.
+let private reportConfigError (asService: bool) (message: string) =
+    eprintfn "%s" message
+    if asService then
+        try
+            let path = Path.Combine(baseDirectory, (defaultFileSettings ()).LogFile)
+            let stamp = DateTime.Now.ToString "yyyy-MM-dd HH:mm:ss"
+            File.AppendAllText(path, $"{stamp} Error       {message}{Environment.NewLine}")
+        with _ -> ()
+    2
+
 [<EntryPoint>]
 let main argv =
-    let settings, commands = parse defaults [] (List.ofArray argv)
+    let overrides, commands = parse id [] (List.ofArray argv)
     match commands with
-    | [] -> runService settings; 0
-    | [ "check" ] -> (describe settings true).GetAwaiter().GetResult()
-    | [ "once" ] -> requireAdmin (); (describe settings false).GetAwaiter().GetResult()
+    | [] | [ "check" ] | [ "once" ] ->
+        match load overrides with
+        | Error message -> reportConfigError commands.IsEmpty message
+        | Ok settings ->
+            match commands with
+            | [ "check" ] -> (describe settings true).GetAwaiter().GetResult()
+            | [ "once" ] -> requireAdmin (); (describe settings false).GetAwaiter().GetResult()
+            | _ -> runService settings; 0
     | [ "install" ] -> install ()
     | [ "uninstall" ] -> uninstall ()
     | _ -> usage (); 2

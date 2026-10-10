@@ -1,4 +1,4 @@
-/// Il loop del servizio: un giro ogni Interval; nel log solo transizioni e cambi, niente rumore.
+/// The service loop: one round every Interval; the log gets transitions and changes only, no noise.
 module DnsAutoSwitch.Worker
 
 open System
@@ -17,24 +17,24 @@ type Worker(logger: ILogger<Worker>, settings: Settings) =
     member private _.Report(outcome: Outcome) =
         match outcome with
         | Skipped reason ->
-            if lastSkip <> Some reason then logger.LogInformation("in attesa: {Reason}", reason)
+            if lastSkip <> Some reason then logger.LogInformation("waiting: {Reason}", reason)
             lastSkip <- Some reason
         | Reconciled(up, changes) ->
-            if lastSkip.IsSome then logger.LogInformation("ripresa")
+            if lastSkip.IsSome then logger.LogInformation("resumed")
             lastSkip <- None
             if lastUp <> Some up then
-                logger.LogInformation("AdGuard {AdGuard} {State}", settings.AdGuard,
-                                      (if up then "raggiungibile" else "NON raggiungibile"))
+                logger.LogInformation("primary DNS {Primary} {State}", settings.Primary,
+                                      (if up then "reachable" else "UNREACHABLE"))
             lastUp <- Some up
             for c in changes do
                 match c.Result with
                 | Ok () -> logger.LogInformation("[{Adapter}] DNS {From} -> {To}", c.Adapter, formatDns c.From, c.To)
-                | Error e -> logger.LogError("[{Adapter}] DNS {From} -> {To} FALLITO: {Error}", c.Adapter, formatDns c.From, c.To, e)
+                | Error e -> logger.LogError("[{Adapter}] DNS {From} -> {To} FAILED: {Error}", c.Adapter, formatDns c.From, c.To, e)
 
     override this.ExecuteAsync(ct: CancellationToken) =
         task {
-            logger.LogInformation("avvio: AdGuard {AdGuard}, router {Router}, sonda {Probe} ogni {Seconds}s",
-                                  settings.AdGuard, settings.Router, settings.ProbeName, settings.Interval.TotalSeconds)
+            logger.LogInformation("started: primary {Primary}, fallback {Fallback}, probe {Probe} every {Seconds}s",
+                                  settings.Primary, settings.Fallback, settings.ProbeName, settings.Interval.TotalSeconds)
             try
                 use timer = new PeriodicTimer(settings.Interval)
                 let mutable go = true
@@ -43,10 +43,10 @@ type Worker(logger: ILogger<Worker>, settings: Settings) =
                         let! outcome = tick settings false
                         this.Report outcome
                     with ex when not ct.IsCancellationRequested ->
-                        logger.LogError(ex, "giro fallito")
+                        logger.LogError(ex, "round failed")
                     let! next = timer.WaitForNextTickAsync ct
                     go <- next
             with :? OperationCanceledException ->
                 ()
-            logger.LogInformation("stop")
+            logger.LogInformation("stopped")
         }
