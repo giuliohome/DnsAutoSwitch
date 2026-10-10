@@ -7,7 +7,7 @@
     <SelfContained>false</SelfContained>
     <AssemblyName>DnsAutoSwitch</AssemblyName>
     <RootNamespace>DnsAutoSwitch</RootNamespace>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <Authors>giuliohome</Authors>
     <Description>Windows service that keeps the LAN DNS on a primary server (AdGuard Home, Pi-hole) while it answers, and on a fallback otherwise.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

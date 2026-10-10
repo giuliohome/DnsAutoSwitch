@@ -48,5 +48,6 @@ type Worker(logger: ILogger<Worker>, settings: Settings) =
                     go <- next
             with :? OperationCanceledException ->
                 ()
-            logger.LogInformation("stopped")
+            // Belt and braces: at system shutdown a log sink may already be gone; never fail the service for a log line.
+            try logger.LogInformation("stopped") with _ -> ()
         }

@@ -27,3 +27,19 @@ type FileLoggerProvider(path: string) =
     interface ILoggerProvider with
         member _.CreateLogger(_category) = FileLogger(path, gate) :> ILogger
         member _.Dispose() = ()
+
+/// Wraps another provider so that a failing sink can never throw into the code that logs.
+/// Case seen in the wild: during a Windows shutdown the Event Log service stops before this one and
+/// every write fails with "The interface is unknown"; without this wrapper the logging library rethrows
+/// that as "An error occurred while writing to logger(s)" and the host reports "BackgroundService failed".
+type SafeLogger(inner: ILogger) =
+    interface ILogger with
+        member _.BeginScope(state) = try inner.BeginScope state with _ -> null
+        member _.IsEnabled(level) = try inner.IsEnabled level with _ -> false
+        member _.Log(level, eventId, state, ex, formatter) =
+            try inner.Log(level, eventId, state, ex, formatter) with _ -> ()
+
+type SafeLoggerProvider(inner: ILoggerProvider) =
+    interface ILoggerProvider with
+        member _.CreateLogger(category) = SafeLogger(inner.CreateLogger category) :> ILogger
+        member _.Dispose() = inner.Dispose()

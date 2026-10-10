@@ -8,6 +8,7 @@ open System.Security.Principal
 open System.ServiceProcess
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
+open Microsoft.Extensions.Hosting.WindowsServices
 open Microsoft.Extensions.Logging
 open Microsoft.Extensions.Logging.EventLog
 open DnsAutoSwitch.Config
@@ -120,9 +121,16 @@ let private runService (s: Settings) =
     builder.Services.AddWindowsService(fun o -> o.ServiceName <- serviceName) |> ignore
     builder.Services.AddSingleton<Settings>(s) |> ignore
     builder.Services.AddHostedService<Worker>() |> ignore
+    // Only sinks that can never throw. The default Event Log provider throws once the Event Log service
+    // has stopped during a Windows shutdown, and the logging library would rethrow that into the service.
+    builder.Logging.ClearProviders() |> ignore
     builder.Logging.AddProvider(new FileLoggerProvider(s.LogFile)) |> ignore
-    // By default only Warning and above reach the Event Log; switches are Information.
-    builder.Logging.AddFilter<EventLogLoggerProvider>(fun (level: LogLevel) -> level >= LogLevel.Information) |> ignore
+    if WindowsServiceHelpers.IsWindowsService() then
+        let eventLog = new EventLogLoggerProvider(EventLogSettings(SourceName = serviceName))
+        builder.Logging.AddProvider(new SafeLoggerProvider(eventLog)) |> ignore
+    else
+        builder.Logging.AddSimpleConsole() |> ignore
+    builder.Logging.SetMinimumLevel LogLevel.Information |> ignore
     builder.Build().Run()
 
 /// A service has no console: a configuration error goes to the default log file next to the executable.
