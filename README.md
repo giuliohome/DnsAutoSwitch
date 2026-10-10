@@ -116,4 +116,5 @@ annulla (exit 2) e scartato dal servizio al boot successivo (data precedente al 
 - `check` in dry-run: adapter, sonda e decisione corretti con Ubuntu spento; `--adguard 192.168.1.1` → "raggiungibile".
 - Switch vero: DNS messo a mano su `.202` (spento), `once` lo ha riportato su `192.168.1.1`.
 - `install`: `AUTO_START (DELAYED)`, recovery `RESTART` dopo 20 s, servizio `Running`, log su file con avvio e stato.
-- Hold, hold stale e pausa: vedi il log in fondo a `DNS_AUTOSWITCH.md` nel repo `hello-gitea`.
+- Hold, hold stale e pausa contro il servizio in esecuzione: tutti e tre ok (dettaglio in `DNS_AUTOSWITCH.md`, repo `hello-gitea`).
+- Ubuntu acceso con il servizio in esecuzione (22:00:43): "AdGuard 192.168.1.202 raggiungibile" e "[Wi-Fi 2] DNS 192.168.1.1 -> 192.168.1.202" nello stesso giro, senza shortcut.
