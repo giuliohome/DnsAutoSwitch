@@ -149,6 +149,11 @@ dotnet publish -c Release --self-contained -p:PublishSingleFile=true -p:EnableCo
 To update a running installation: `Stop-Service DnsAutoSwitch`, publish, `Start-Service DnsAutoSwitch`
 (the executable is locked while the service runs). `appsettings.json` is never overwritten by a publish.
 
+CI: `.github/workflows/build.yml` builds on GitHub (Windows runner) and attaches the self-contained zip to
+releases on `v*` tags. `.gitea/workflows/build.yaml` does the same build on a self-hosted Gitea runner
+(Linux container with the .NET SDK, cross-publishing win-x64); Gitea ignores the `.github` folder when
+`.gitea/workflows` exists, and GitHub ignores `.gitea`.
+
 | File | Content |
 |---|---|
 | `Config.fs` | `Settings`, defaults, `appsettings.json` loading and validation |

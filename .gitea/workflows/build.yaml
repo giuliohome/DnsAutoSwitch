@@ -1,0 +1,56 @@
+# Gitea Actions (self-hosted runner "beast-linux", Docker on the Beast).
+# Builds and cross-publishes the win-x64 executable from Linux: the .NET SDK can target win-x64
+# from any OS, it just cannot run the result. GitHub keeps using .github/workflows/build.yml;
+# Gitea ignores that folder as soon as .gitea/workflows exists.
+name: build (Gitea)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Cross-publish win-x64 on Linux
+    runs-on: beast-linux
+    # Override the runner's node:22-bookworm default with the .NET 10 SDK image.
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    timeout-minutes: 20
+    steps:
+      - name: Action runtime (node) and packaging tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs git ca-certificates zip
+
+      - uses: https://github.com/actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Publish win-x64 (self-contained, single file)
+        run: dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o publish
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git rev-parse HEAD > publish/COMMIT
+          (cd publish && zip -9 ../dist/DnsAutoSwitch-win-x64.zip DnsAutoSwitch.exe appsettings.example.json COMMIT)
+          sha256sum dist/DnsAutoSwitch-win-x64.zip | tee dist/SHA256SUMS
+
+      # Gitea-compatible v4 protocol: the artifact is visible and downloadable through the API.
+      - name: Upload package
+        uses: https://github.com/christopherhx/gitea-upload-artifact@v4
+        with:
+          name: DnsAutoSwitch-win-x64
+          path: |
+            dist/DnsAutoSwitch-win-x64.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
