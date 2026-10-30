@@ -7,16 +7,19 @@
     <SelfContained>false</SelfContained>
     <AssemblyName>DnsAutoSwitch</AssemblyName>
     <RootNamespace>DnsAutoSwitch</RootNamespace>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
     <Authors>giuliohome</Authors>
     <Description>Windows service that keeps the LAN DNS on a primary server (AdGuard Home, Pi-hole) while it answers, and on a fallback otherwise.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- The test project lives below this folder but is not part of the service. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="Config.fs" />
+    <Compile Include="Security.fs" />
     <Compile Include="Dns.fs" />
     <Compile Include="Switch.fs" />
     <Compile Include="FileLog.fs" />

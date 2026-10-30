@@ -1,4 +1,6 @@
 /// Settings: built-in defaults, then appsettings.json next to the executable, then command-line overrides.
+/// The configuration decides what DNS server the LAN uses, so it must sit in a folder only administrators can
+/// write (see Security).
 module DnsAutoSwitch.Config
 
 open System
@@ -24,11 +26,13 @@ type Settings =
       /// How often to check.
       Interval: TimeSpan
       /// File a shutdown script writes with an ISO-8601 timestamp. While it is valid, DNS is left alone.
+      /// Ordinary users can write it: the service only ever reads it (see Switch).
       HoldFile: string
       /// A hold is valid only if written after the current boot and less than this long ago.
       HoldMaxAge: TimeSpan
       /// While this file exists, DNS is left alone.
       PauseFile: string
+      /// Written as SYSTEM: its folder must be writable by administrators only (see Security.auditLog).
       LogFile: string }
 
 /// Shape of the "DnsAutoSwitch" section of appsettings.json: plain strings and numbers, mutable so the
@@ -51,6 +55,15 @@ type FileSettings =
 let baseDirectory = AppContext.BaseDirectory
 let configFile = Path.Combine(baseDirectory, "appsettings.json")
 
+/// %ProgramData%\DnsAutoSwitch: the hold and pause files. install creates it so that ordinary users can create
+/// files in it (shutdown scripts run without elevation) but cannot replace it. The service runs as SYSTEM and
+/// never writes there.
+let stateFolder =
+    Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.CommonApplicationData, "DnsAutoSwitch")
+
+/// %ProgramData%\DnsAutoSwitch\logs: the log, writable by administrators only.
+let logFolder = Path.Combine(stateFolder, "logs")
+
 /// A fresh copy each time: the binder mutates the instance it is given.
 let defaultFileSettings () : FileSettings =
     { Primary = ""
@@ -62,9 +75,9 @@ let defaultFileSettings () : FileSettings =
       ProbeAttempts = 2
       IntervalSeconds = 60
       HoldMaxAgeMinutes = 30
-      HoldFile = "DnsAutoSwitch.hold"
-      PauseFile = "DnsAutoSwitch.paused"
-      LogFile = "DnsAutoSwitch.log" }
+      HoldFile = Path.Combine(stateFolder, "DnsAutoSwitch.hold")
+      PauseFile = Path.Combine(stateFolder, "DnsAutoSwitch.paused")
+      LogFile = Path.Combine(logFolder, "DnsAutoSwitch.log") }
 
 type private ResultBuilder() =
     member _.Bind(r, f) = Result.bind f r
@@ -77,9 +90,15 @@ let private parseIp (label: string) (text: string) =
     | true, ip -> Ok ip
     | _ -> Error $"{label}: '{text}' is not a valid IP address"
 
-/// Relative paths are relative to the executable, not to the current directory (a service starts in System32).
-let private resolvePath (path: string) =
-    if Path.IsPathRooted path then path else Path.Combine(baseDirectory, path)
+/// Environment variables such as %ProgramData% are expanded. Relative paths are relative to the executable, not
+/// to the current directory (a service starts in System32).
+let resolvePath (path: string) =
+    let expanded = Environment.ExpandEnvironmentVariables path
+    if Path.IsPathRooted expanded then Path.GetFullPath expanded
+    else Path.Combine(baseDirectory, expanded)
+
+/// Where a configuration error goes when the configuration itself cannot be read.
+let defaultLogFile () = resolvePath (defaultFileSettings ()).LogFile
 
 /// Validates and converts the file settings into typed settings.
 let toSettings (f: FileSettings) : Result<Settings, string> =

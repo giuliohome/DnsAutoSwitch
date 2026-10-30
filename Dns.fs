@@ -3,6 +3,7 @@ module DnsAutoSwitch.Dns
 
 open System
 open System.Diagnostics
+open System.IO
 open System.Net
 open System.Net.NetworkInformation
 open System.Net.Sockets
@@ -101,11 +102,13 @@ let private runProcess (file: string) (args: string) =
 
 /// Static DNS with a single server. Never a secondary one: the Windows resolver does not fail over
 /// deterministically, so a secondary server would silently bypass the primary.
+/// Full path: a bare "netsh.exe" is looked up in the executable's folder first.
 let setDns (adapterName: string) (server: IPAddress) =
-    runProcess "netsh.exe"
+    runProcess (Path.Combine(Environment.SystemDirectory, "netsh.exe"))
         $"interface ipv4 set dnsservers name=\"{adapterName}\" source=static address={server} register=primary validate=no"
 
-[<DllImport("dnsapi.dll")>]
+/// From System32 only, never from the executable's folder.
+[<DllImport("dnsapi.dll"); DefaultDllImportSearchPaths(DllImportSearchPath.System32)>]
 extern bool DnsFlushResolverCache()
 
 /// Same as ipconfig /flushdns, without spawning a process.

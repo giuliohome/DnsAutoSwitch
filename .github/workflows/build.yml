@@ -21,6 +21,10 @@ jobs:
       - name: Build
         run: dotnet build -c Release
 
+      # Windows only (ACL APIs), so not on the Linux Gitea runner.
+      - name: Test
+        run: dotnet test tests/DnsAutoSwitch.Tests -c Release
+
       - name: Publish (self-contained, single file)
         run: dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o publish
 
